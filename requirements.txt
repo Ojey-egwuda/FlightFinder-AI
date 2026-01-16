@@ -1,0 +1,27 @@
+# FlightFinder Requirements
+
+# LLM & Agents
+langchain>=0.2.0
+langchain-openai>=0.1.0
+langgraph>=0.1.0
+openai>=1.0.0
+
+# MCP Server
+mcp>=1.0.0
+fastmcp>=0.1.0
+
+# HTTP
+requests>=2.31.0
+
+# Data processing
+pandas>=2.0.0
+
+# Web UI
+streamlit>=1.28.0
+
+# Environment
+python-dotenv>=1.0.0
+
+# Testing
+pytest>=7.4.0
+pytest-cov>=4.1.0

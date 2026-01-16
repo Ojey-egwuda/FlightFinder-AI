@@ -1,0 +1,10 @@
+{
+  "mcpServers": {
+    "travel-assistant": {
+      "command": "python",
+      "args": ["-m", "mcp_server.travel_mcp"],
+      "cwd": "/path/to/flightfinder",
+      "env": {}
+    }
+  }
+}
