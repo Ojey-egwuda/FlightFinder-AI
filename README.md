@@ -1,5 +1,9 @@
 # ✈️ FlightFinder AI
 
+🚀 <a href="https://flightfinder-ai.streamlit.app/" target="_blank" rel="noopener noreferrer">Live App</a>
+
+👉 https://flightfinder-ai.streamlit.app/
+
 An AI-powered flight search application that finds, ranks, and recommends the best flights based on your preferences.
 
 ![Python](https://img.shields.io/badge/Python-3.9+-blue)
