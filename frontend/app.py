@@ -440,18 +440,18 @@ def main():
             flights = results["flights"]
             ranker = results["ranker"]
             query = results["query"]
-            
+
             # Back button
             if st.button("← New Search", use_container_width=True):
                 st.session_state.search_performed = False
                 st.session_state.search_results = None
                 st.rerun()
-            
+
             # Results header
             st.markdown(f"### ✈️ {query['origin_city']} → {query['dest_city']}")
             st.caption(f"📅 {query['formatted_date']} • {len(flights)} flights found")
-            
-            # Quick stats
+
+            # Quick stats (based on full unfiltered set)
             col1, col2 = st.columns(2)
             with col1:
                 best_price = min(f["price"]["total"] for f in flights)
@@ -459,21 +459,55 @@ def main():
             with col2:
                 direct_count = sum(1 for f in flights if f["itineraries"][0]["stops"] == 0)
                 st.metric("🎯 Direct", direct_count)
-            
+
             st.markdown("---")
-            
-            # AI Recommendation
-            with st.expander("💡 AI Recommendation", expanded=True):
-                st.markdown(ranker.explain_recommendation(flights[0], flights))
-            
-            # Flight results
-            st.markdown(f"### 📋 Results")
-            
-            for i, flight in enumerate(flights[:10]):
-                display_flight(flight, ranker, is_best=(i == 0))
-            
-            if len(flights) > 10:
-                st.info(f"Showing top 10 of {len(flights)}")
+
+            # ---- Filter panel ----
+            all_airlines = sorted({
+                f["itineraries"][0]["segments"][0]["carrier"]["name"]
+                for f in flights
+            })
+            all_prices = [f["price"]["total"] for f in flights]
+            price_min, price_max = int(min(all_prices)), int(max(all_prices)) + 1
+
+            with st.expander("🔍 Filter Results", expanded=False):
+                selected_airlines = st.multiselect(
+                    "Airlines", all_airlines, default=all_airlines, key="filter_airline"
+                )
+                stops_options = ["Any", "Direct only", "1 stop max", "2 stops max"]
+                stops_choice = st.selectbox("Max stops", stops_options, index=0, key="filter_stops")
+                price_limit = st.slider(
+                    "Max price (£)", min_value=price_min, max_value=price_max,
+                    value=price_max, key="filter_price"
+                )
+
+            # Map stops choice → max integer
+            stops_map = {"Any": 99, "Direct only": 0, "1 stop max": 1, "2 stops max": 2}
+            max_stops_int = stops_map[stops_choice]
+
+            filtered = [
+                f for f in flights
+                if f["itineraries"][0]["segments"][0]["carrier"]["name"] in selected_airlines
+                and f["itineraries"][0]["stops"] <= max_stops_int
+                and f["price"]["total"] <= price_limit
+            ]
+
+            if not filtered:
+                st.warning("No flights match your filters. Try relaxing them.")
+            else:
+                st.caption(f"Showing {min(10, len(filtered))} of {len(filtered)} matching flights")
+
+                # AI Recommendation (on filtered set)
+                with st.expander("💡 AI Recommendation", expanded=True):
+                    st.markdown(ranker.explain_recommendation(filtered[0], filtered))
+
+                # Flight list
+                st.markdown("### 📋 Results")
+                for i, flight in enumerate(filtered[:10]):
+                    display_flight(flight, ranker, is_best=(i == 0))
+
+                if len(filtered) > 10:
+                    st.info(f"Showing top 10 of {len(filtered)} matching flights")
     
     render_footer()
 

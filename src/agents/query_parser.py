@@ -9,8 +9,12 @@ from datetime import datetime, timedelta
 from typing import Optional
 from dataclasses import dataclass
 
-from langchain_openai import ChatOpenAI
-from langchain_core.messages import HumanMessage, SystemMessage
+try:
+    from langchain_openai import ChatOpenAI
+    from langchain_core.messages import HumanMessage, SystemMessage
+    _LANGCHAIN_AVAILABLE = True
+except ImportError:
+    _LANGCHAIN_AVAILABLE = False
 
 from src.apis.amadeus import resolve_airport, AIRPORTS
 
@@ -39,6 +43,11 @@ class QueryParserAgent:
     """Parses natural language flight queries into structured parameters."""
     
     def __init__(self, model: str = "gpt-4o-mini"):
+        if not _LANGCHAIN_AVAILABLE:
+            raise ImportError(
+                "langchain_openai is required for QueryParserAgent. "
+                "Install it with: pip install langchain-openai"
+            )
         self.llm = ChatOpenAI(
             model=model,
             temperature=0,

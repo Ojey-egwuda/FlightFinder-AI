@@ -18,63 +18,19 @@ Author: Ojonugwa Egwuda - FlightFinder Project
 """
 
 import os
+import sys
 import json
 import requests
 from datetime import datetime
 from typing import Optional
 from mcp.server.fastmcp import FastMCP
 
+# Allow imports from the project root when run as a standalone script
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+from src.data.airports import AIRPORT_COORDS_NAMED as AIRPORT_COORDS, AIRPORT_TIMEZONES_NAMED as AIRPORT_TIMEZONES
+
 # Initialize MCP server
 mcp = FastMCP("travel-assistant")
-
-
-# WEATHER TOOL
-
-AIRPORT_COORDS = {
-    # Nigeria
-    "LOS": (6.5244, 3.3792, "Lagos"),
-    "ABV": (9.0579, 7.4951, "Abuja"),
-    "PHC": (4.8470, 7.0218, "Port Harcourt"),
-    # UK
-    "LHR": (51.4700, -0.4543, "London"),
-    "LGW": (51.1537, -0.1821, "London Gatwick"),
-    "MAN": (53.3537, -2.2750, "Manchester"),
-    "EDI": (55.9500, -3.3725, "Edinburgh"),
-    # Balkans
-    "TBS": (41.6692, 44.9547, "Tbilisi"),
-    "BEG": (44.8184, 20.3091, "Belgrade"),
-    "TIA": (41.4147, 19.7206, "Tirana"),
-    "SJJ": (43.8246, 18.3315, "Sarajevo"),
-    # Turkey
-    "IST": (41.2753, 28.7519, "Istanbul"),
-    "AYT": (36.8987, 30.8005, "Antalya"),
-    # Middle East
-    "DXB": (25.2532, 55.3657, "Dubai"),
-    "AUH": (24.4330, 54.6511, "Abu Dhabi"),
-    "DOH": (25.2731, 51.6081, "Doha"),
-    # Asia
-    "SIN": (1.3644, 103.9915, "Singapore"),
-    "HND": (35.5494, 139.7798, "Tokyo"),
-    "NRT": (35.7720, 140.3929, "Tokyo Narita"),
-    "HKG": (22.3080, 113.9185, "Hong Kong"),
-    # Europe
-    "CDG": (49.0097, 2.5479, "Paris"),
-    "AMS": (52.3105, 4.7683, "Amsterdam"),
-    "FCO": (41.8003, 12.2389, "Rome"),
-    "MAD": (40.4983, -3.5676, "Madrid"),
-    "BCN": (41.2971, 2.0785, "Barcelona"),
-    "FRA": (50.0379, 8.5622, "Frankfurt"),
-    # Americas
-    "JFK": (40.6413, -73.7781, "New York"),
-    "LAX": (33.9416, -118.4085, "Los Angeles"),
-    "MIA": (25.7959, -80.2870, "Miami"),
-    # Caribbean
-    "PUJ": (18.5675, -68.3634, "Punta Cana"),
-    "SXM": (18.0410, -63.1089, "Sint Maarten"),
-    # Africa
-    "CMN": (33.3675, -7.5898, "Casablanca"),
-    "JNB": (-26.1392, 28.2460, "Johannesburg"),
-}
 
 WEATHER_ICONS = {
     "01d": "☀️", "01n": "🌙",
@@ -256,32 +212,7 @@ def get_exchange_rate(
 
 
 
-# TIME ZONE TOOL
-
-AIRPORT_TIMEZONES = {
-    # Nigeria
-    "LOS": ("WAT", 1), "ABV": ("WAT", 1), "PHC": ("WAT", 1),
-    # UK
-    "LHR": ("GMT", 0), "LGW": ("GMT", 0), "MAN": ("GMT", 0), "EDI": ("GMT", 0),
-    # USA
-    "JFK": ("EST", -5), "LAX": ("PST", -8), "MIA": ("EST", -5),
-    # Middle East
-    "DXB": ("GST", 4), "AUH": ("GST", 4), "DOH": ("AST", 3),
-    # Turkey
-    "IST": ("TRT", 3), "AYT": ("TRT", 3),
-    # Balkans
-    "TBS": ("GET", 4), "BEG": ("CET", 1), "TIA": ("CET", 1), "SJJ": ("CET", 1),
-    # Asia
-    "SIN": ("SGT", 8), "HND": ("JST", 9), "NRT": ("JST", 9), "HKG": ("HKT", 8),
-    "PEK": ("CST", 8), "PVG": ("CST", 8),
-    # Europe
-    "CDG": ("CET", 1), "AMS": ("CET", 1), "FCO": ("CET", 1), 
-    "MAD": ("CET", 1), "BCN": ("CET", 1), "FRA": ("CET", 1),
-    # Caribbean
-    "PUJ": ("AST", -4), "SXM": ("AST", -4),
-    # Africa
-    "CMN": ("WET", 1), "JNB": ("SAST", 2),
-}
+# TIME ZONE TOOL — imported from src.data.airports (AIRPORT_TIMEZONES alias above)
 
 
 @mcp.tool()

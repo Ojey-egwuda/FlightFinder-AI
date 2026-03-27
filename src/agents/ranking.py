@@ -29,7 +29,15 @@ class FlightPreferences:
 
 class FlightRankingAgent:
     """Ranks and scores flight options based on user preferences."""
-    
+
+    # Price scoring range (GBP) — calibrated for Lagos-London typical fares
+    PRICE_MIN = 300
+    PRICE_MAX = 1500
+
+    # Duration scoring range (hours) — direct LOS-LHR ≈ 6.5h, worst-case with long layover
+    DURATION_MIN_HOURS = 6.5
+    DURATION_MAX_HOURS = 24.0
+
     # Time windows for departure preference
     TIME_WINDOWS = {
         "morning": (5, 12),     # 5am - 12pm
@@ -101,36 +109,20 @@ class FlightRankingAgent:
         return f"{h}h {m}m"
     
     def score_price(self, price: float) -> float:
-        """
-        Score price (0-100, lower price = higher score).
-        Calibrated for Lagos-London flights (£300-£1500 typical range).
-        """
-        # Define price range
-        min_expected = 300
-        max_expected = 1500
-        
-        if price <= min_expected:
+        """Score price (0-100, lower price = higher score)."""
+        if price <= self.PRICE_MIN:
             return 100
-        elif price >= max_expected:
+        elif price >= self.PRICE_MAX:
             return 0
-        else:
-            # Linear scale between min and max
-            return 100 - ((price - min_expected) / (max_expected - min_expected) * 100)
+        return 100 - ((price - self.PRICE_MIN) / (self.PRICE_MAX - self.PRICE_MIN) * 100)
     
     def score_duration(self, duration_hours: float) -> float:
-        """
-        Score duration (0-100, shorter = higher score).
-        Direct Lagos-London is ~6.5 hours, max reasonable is ~24 hours.
-        """
-        min_duration = 6.5   # Direct flight
-        max_duration = 24    # Very long layover
-        
-        if duration_hours <= min_duration:
+        """Score duration (0-100, shorter = higher score)."""
+        if duration_hours <= self.DURATION_MIN_HOURS:
             return 100
-        elif duration_hours >= max_duration:
+        elif duration_hours >= self.DURATION_MAX_HOURS:
             return 0
-        else:
-            return 100 - ((duration_hours - min_duration) / (max_duration - min_duration) * 100)
+        return 100 - ((duration_hours - self.DURATION_MIN_HOURS) / (self.DURATION_MAX_HOURS - self.DURATION_MIN_HOURS) * 100)
     
     def score_stops(self, num_stops: int) -> float:
         """Score number of stops (0-100)."""

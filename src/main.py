@@ -3,8 +3,11 @@ FlightFinder - Main Application
 An AI-powered flight search agent.
 """
 
+import logging
 import os
 from dotenv import load_dotenv
+
+logger = logging.getLogger(__name__)
 
 # Load environment variables
 load_dotenv()
@@ -44,7 +47,7 @@ class FlightFinder:
         Returns:
             Dict with results and recommendation
         """
-        print(f"\n🤖 Understanding query: '{query}'")
+        logger.info("Understanding query: '%s'", query)
         
         # Parse the query
         if self.use_llm_parser:
@@ -55,7 +58,7 @@ class FlightFinder:
         if not parsed.is_valid:
             return {"error": parsed.error_message}
         
-        print(f"✓ Parsed: {parsed.origin_name} → {parsed.destination_name} on {parsed.departure_date}")
+        logger.info("Parsed: %s → %s on %s", parsed.origin_name, parsed.destination_name, parsed.departure_date)
         
         # Search flights
         if parsed.flexible_dates:
@@ -151,8 +154,12 @@ class FlightFinder:
         origin_info = get_airport_info(origin_code)
         dest_info = get_airport_info(dest_code)
         
-        print(f"\n🔍 Searching: {origin_info['city']} ({origin_code}) → {dest_info['city']} ({dest_code})")
-        print(f"   Date: {departure_date}" + (f" (±3 days)" if flexible_dates else ""))
+        logger.info(
+            "Searching: %s (%s) → %s (%s) on %s%s",
+            origin_info["city"], origin_code,
+            dest_info["city"], dest_code,
+            departure_date, " (±3 days)" if flexible_dates else "",
+        )
         
         # Search flights
         if flexible_dates:

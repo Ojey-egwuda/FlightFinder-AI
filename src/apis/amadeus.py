@@ -3,61 +3,134 @@ Amadeus Flight Search API Integration
 Documentation: https://developers.amadeus.com/
 """
 
-import requests
+import hashlib
+import json
+import logging
+import os
+import threading
+import time
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timedelta
 from typing import List, Optional
-import os
+
+import requests
 from dotenv import load_dotenv
+
+from src.data.airports import AIRPORTS, AIRPORT_DATA
 
 load_dotenv()
 
+logger = logging.getLogger(__name__)
+
+# Tuneable constants
+_CACHE_TTL_SECONDS = 600   # 10-minute result TTL
+_REQUEST_TIMEOUT = 10      # seconds per HTTP call
+_MAX_RETRIES = 2           # attempts on transient 5xx / timeout
+_RETRY_DELAY = 1.5         # seconds between retries
+_CACHE_PATH = os.path.normpath(
+    os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "..", ".cache", "flights.json")
+)
+
+
+# ---------------------------------------------------------------------------
+# Persistent cache helpers
+# ---------------------------------------------------------------------------
+
+def _load_persistent_cache() -> dict:
+    """Load cache from disk, dropping already-expired entries."""
+    try:
+        with open(_CACHE_PATH) as fh:
+            raw = json.load(fh)
+        now = datetime.now()
+        return {
+            k: v for k, v in raw.items()
+            if datetime.fromisoformat(v["expires_at"]) > now
+        }
+    except (FileNotFoundError, json.JSONDecodeError, KeyError):
+        return {}
+
+
+def _save_persistent_cache(cache: dict) -> None:
+    """Serialise cache dict to disk (datetime → ISO string)."""
+    try:
+        os.makedirs(os.path.dirname(_CACHE_PATH), exist_ok=True)
+        serialisable = {
+            k: {
+                "result": v["result"],
+                "expires_at": v["expires_at"].isoformat()
+                    if isinstance(v["expires_at"], datetime)
+                    else v["expires_at"],
+            }
+            for k, v in cache.items()
+        }
+        with open(_CACHE_PATH, "w") as fh:
+            json.dump(serialisable, fh)
+    except OSError as exc:
+        logger.warning("Could not write cache to disk: %s", exc)
+
+
+# ---------------------------------------------------------------------------
+# API client
+# ---------------------------------------------------------------------------
 
 class AmadeusAPI:
     """Amadeus Flight Search API client."""
-    
+
     def __init__(self, sandbox: bool = True):
         self.client_id = os.getenv("AMADEUS_CLIENT_ID")
         self.client_secret = os.getenv("AMADEUS_CLIENT_SECRET")
         self.sandbox = sandbox
-        
-        if sandbox:
-            self.base_url = "https://test.api.amadeus.com"
-        else:
-            self.base_url = "https://api.amadeus.com"
-        
+        self.base_url = (
+            "https://test.api.amadeus.com" if sandbox else "https://api.amadeus.com"
+        )
+
         self.access_token = None
         self.token_expiry = None
-    
+        self._auth_lock = threading.Lock()    # guards token refresh
+
+        self._cache_lock = threading.Lock()   # guards cache reads/writes
+        self._search_cache: dict = _load_persistent_cache()
+
+    # ------------------------------------------------------------------
+    # Authentication
+    # ------------------------------------------------------------------
+
     def _authenticate(self):
-        """Get OAuth2 access token."""
-        # Skip if we have a valid token
-        if self.access_token and self.token_expiry and datetime.now() < self.token_expiry:
-            return
-        
-        response = requests.post(
-            f"{self.base_url}/v1/security/oauth2/token",
-            data={
-                "grant_type": "client_credentials",
-                "client_id": self.client_id,
-                "client_secret": self.client_secret
-            },
-            headers={"Content-Type": "application/x-www-form-urlencoded"}
-        )
-        
-        if response.status_code != 200:
-            raise Exception(f"Authentication failed: {response.status_code} - {response.text}")
-        
-        data = response.json()
-        self.access_token = data["access_token"]
-        # Set expiry 60 seconds before actual expiry for safety
-        self.token_expiry = datetime.now() + timedelta(seconds=data["expires_in"] - 60)
-        print(f"Authenticated with Amadeus API")
-    
+        """Get OAuth2 access token (thread-safe, cached until near expiry)."""
+        with self._auth_lock:
+            if self.access_token and self.token_expiry and datetime.now() < self.token_expiry:
+                return
+
+            response = requests.post(
+                f"{self.base_url}/v1/security/oauth2/token",
+                data={
+                    "grant_type": "client_credentials",
+                    "client_id": self.client_id,
+                    "client_secret": self.client_secret,
+                },
+                headers={"Content-Type": "application/x-www-form-urlencoded"},
+                timeout=_REQUEST_TIMEOUT,
+            )
+
+            if response.status_code != 200:
+                raise Exception(
+                    f"Authentication failed: {response.status_code} - {response.text}"
+                )
+
+            data = response.json()
+            self.access_token = data["access_token"]
+            # Buffer 60 s before true expiry to avoid last-second failures
+            self.token_expiry = datetime.now() + timedelta(seconds=data["expires_in"] - 60)
+            logger.info("Authenticated with Amadeus API")
+
     def _headers(self) -> dict:
-        """Get headers with auth token."""
         self._authenticate()
         return {"Authorization": f"Bearer {self.access_token}"}
-    
+
+    # ------------------------------------------------------------------
+    # Flight search
+    # ------------------------------------------------------------------
+
     def search_flights(
         self,
         origin: str,
@@ -67,65 +140,147 @@ class AmadeusAPI:
         adults: int = 1,
         travel_class: str = "ECONOMY",
         max_results: int = 10,
-        nonstop_only: bool = False
+        nonstop_only: bool = False,
     ) -> dict:
         """
         Search for flights.
-        
+
         Args:
-            origin: IATA airport code (e.g., "LOS" for Lagos, "LHR" for London Heathrow)
+            origin: IATA airport code (e.g. "LOS")
             destination: IATA airport code
             departure_date: YYYY-MM-DD format
-            return_date: YYYY-MM-DD format (optional for one-way)
+            return_date: YYYY-MM-DD format (optional, one-way if omitted)
             adults: Number of adult passengers
-            travel_class: ECONOMY, PREMIUM_ECONOMY, BUSINESS, FIRST
-            max_results: Maximum number of offers to return
-            nonstop_only: Only return non-stop flights
-            
+            travel_class: ECONOMY | PREMIUM_ECONOMY | BUSINESS | FIRST
+            max_results: Maximum offers to return
+            nonstop_only: Restrict to non-stop flights
+
         Returns:
-            Dict with parsed flight offers
+            {"offers": [...], "total_results": int, "error": False}
+            or {"error": True, "status_code": int, "message": str}
         """
+        origin = origin.upper().strip()
+        destination = destination.upper().strip()
+
+        # ---- Input validation ----
+        if origin == destination:
+            return {
+                "error": True, "status_code": 400,
+                "message": "Origin and destination cannot be the same airport.",
+            }
+
+        try:
+            dep = datetime.strptime(departure_date, "%Y-%m-%d")
+        except ValueError:
+            return {
+                "error": True, "status_code": 400,
+                "message": f"Invalid date format '{departure_date}'. Use YYYY-MM-DD.",
+            }
+
+        if dep.date() < datetime.now().date():
+            return {
+                "error": True, "status_code": 400,
+                "message": "Departure date cannot be in the past.",
+            }
+
+        if return_date:
+            try:
+                ret = datetime.strptime(return_date, "%Y-%m-%d")
+            except ValueError:
+                return {
+                    "error": True, "status_code": 400,
+                    "message": f"Invalid return date format '{return_date}'. Use YYYY-MM-DD.",
+                }
+            if ret.date() < dep.date():
+                return {
+                    "error": True, "status_code": 400,
+                    "message": "Return date cannot be before departure date.",
+                }
+
+        # ---- Build params ----
         params = {
-            "originLocationCode": origin.upper(),
-            "destinationLocationCode": destination.upper(),
+            "originLocationCode": origin,
+            "destinationLocationCode": destination,
             "departureDate": departure_date,
             "adults": adults,
             "travelClass": travel_class,
             "max": max_results,
-            "currencyCode": "GBP"
+            "currencyCode": "GBP",
         }
-        
         if return_date:
             params["returnDate"] = return_date
-        
         if nonstop_only:
             params["nonStop"] = "true"
-        
-        print(f"Searching flights: {origin} → {destination} on {departure_date}")
-        
-        response = requests.get(
-            f"{self.base_url}/v2/shopping/flight-offers",
-            headers=self._headers(),
-            params=params
-        )
-        
-        if response.status_code != 200:
+
+        # ---- Cache lookup ----
+        cache_key = hashlib.md5(json.dumps(params, sort_keys=True).encode()).hexdigest()
+        with self._cache_lock:
+            cached = self._search_cache.get(cache_key)
+        if cached:
+            expires = cached["expires_at"]
+            if isinstance(expires, str):
+                expires = datetime.fromisoformat(expires)
+            if datetime.now() < expires:
+                logger.debug("Cache hit: %s → %s on %s", origin, destination, departure_date)
+                return cached["result"]
+
+        logger.info("Searching flights: %s → %s on %s", origin, destination, departure_date)
+
+        # ---- HTTP request with retry + timeout ----
+        response = None
+        for attempt in range(1, _MAX_RETRIES + 1):
+            try:
+                response = requests.get(
+                    f"{self.base_url}/v2/shopping/flight-offers",
+                    headers=self._headers(),
+                    params=params,
+                    timeout=_REQUEST_TIMEOUT,
+                )
+                if response.status_code < 500:
+                    break  # success or client error — no retry
+                if attempt < _MAX_RETRIES:
+                    logger.warning(
+                        "Amadeus returned %s (attempt %d/%d), retrying in %.1fs…",
+                        response.status_code, attempt, _MAX_RETRIES, _RETRY_DELAY,
+                    )
+                    time.sleep(_RETRY_DELAY)
+            except requests.Timeout:
+                if attempt < _MAX_RETRIES:
+                    logger.warning(
+                        "Request timed out (attempt %d/%d), retrying…", attempt, _MAX_RETRIES
+                    )
+                    time.sleep(_RETRY_DELAY)
+                else:
+                    return {"error": True, "status_code": 408, "message": "Request timed out."}
+            except requests.RequestException as exc:
+                return {"error": True, "status_code": 503, "message": str(exc)}
+
+        if response is None or response.status_code != 200:
             return {
                 "error": True,
-                "status_code": response.status_code,
-                "message": response.text
+                "status_code": response.status_code if response else 503,
+                "message": response.text if response else "No response received.",
             }
-        
-        return self._parse_flight_offers(response.json())
-    
+
+        result = self._parse_flight_offers(response.json())
+        if not result.get("error"):
+            entry = {
+                "result": result,
+                "expires_at": datetime.now() + timedelta(seconds=_CACHE_TTL_SECONDS),
+            }
+            with self._cache_lock:
+                self._search_cache[cache_key] = entry
+                _save_persistent_cache(self._search_cache)
+
+        return result
+
     def _parse_flight_offers(self, raw_data: dict) -> dict:
-        """Parse raw Amadeus response into cleaner format."""
-        
+        """Parse raw Amadeus response into a cleaner, flat structure."""
         offers = []
-        dictionaries = raw_data.get("dictionaries", {})
-        carriers = dictionaries.get("carriers", {})
-        aircraft = dictionaries.get("aircraft", {})
-        
+        dicts = raw_data.get("dictionaries", {})
+        carriers = dicts.get("carriers", {})
+        aircraft = dicts.get("aircraft", {})
+
         for offer in raw_data.get("data", []):
             parsed_offer = {
                 "id": offer.get("id"),
@@ -133,53 +288,43 @@ class AmadeusAPI:
                     "total": float(offer.get("price", {}).get("total", 0)),
                     "currency": offer.get("price", {}).get("currency", "GBP"),
                 },
-                "itineraries": []
+                "itineraries": [],
             }
-            
+
             for itinerary in offer.get("itineraries", []):
-                parsed_itinerary = {
-                    "duration": itinerary.get("duration"),
-                    "segments": []
-                }
-                
+                parsed_itinerary = {"duration": itinerary.get("duration"), "segments": []}
+
                 for segment in itinerary.get("segments", []):
                     carrier_code = segment.get("carrierCode", "")
-                    parsed_segment = {
+                    parsed_itinerary["segments"].append({
                         "departure": {
                             "airport": segment.get("departure", {}).get("iataCode"),
                             "time": segment.get("departure", {}).get("at"),
-                            "terminal": segment.get("departure", {}).get("terminal")
+                            "terminal": segment.get("departure", {}).get("terminal"),
                         },
                         "arrival": {
                             "airport": segment.get("arrival", {}).get("iataCode"),
                             "time": segment.get("arrival", {}).get("at"),
-                            "terminal": segment.get("arrival", {}).get("terminal")
+                            "terminal": segment.get("arrival", {}).get("terminal"),
                         },
                         "carrier": {
                             "code": carrier_code,
-                            "name": carriers.get(carrier_code, carrier_code)
+                            "name": carriers.get(carrier_code, carrier_code),
                         },
                         "flight_number": f"{carrier_code}{segment.get('number', '')}",
                         "aircraft": aircraft.get(
-                            segment.get("aircraft", {}).get("code", ""), 
-                            "Unknown"
+                            segment.get("aircraft", {}).get("code", ""), "Unknown"
                         ),
-                        "duration": segment.get("duration")
-                    }
-                    parsed_itinerary["segments"].append(parsed_segment)
-                
-                # Calculate total stops
+                        "duration": segment.get("duration"),
+                    })
+
                 parsed_itinerary["stops"] = len(parsed_itinerary["segments"]) - 1
                 parsed_offer["itineraries"].append(parsed_itinerary)
-            
+
             offers.append(parsed_offer)
-        
-        return {
-            "offers": offers,
-            "total_results": len(offers),
-            "error": False
-        }
-    
+
+        return {"offers": offers, "total_results": len(offers), "error": False}
+
     def search_flexible_dates(
         self,
         origin: str,
@@ -187,216 +332,80 @@ class AmadeusAPI:
         target_date: str,
         flexibility_days: int = 3,
         adults: int = 1,
-        nonstop_only: bool = False
+        nonstop_only: bool = False,
     ) -> List[dict]:
         """
-        Search across multiple dates to find best prices.
-        
+        Search across multiple dates **concurrently** to find best prices.
+
         Args:
             origin: IATA airport code
             destination: IATA airport code
-            target_date: Target date in YYYY-MM-DD format
-            flexibility_days: Number of days before/after to search
+            target_date: Centre date in YYYY-MM-DD format
+            flexibility_days: Days before/after to include
             adults: Number of passengers
-            nonstop_only: Only return direct flights
-            
+            nonstop_only: Only direct flights
+
         Returns:
-            List of flight offers sorted by price
+            Offers from all dates, sorted by price (cheapest first)
         """
         target = datetime.strptime(target_date, "%Y-%m-%d")
-        all_results = []
-        
-        print(f"Searching {flexibility_days * 2 + 1} dates around {target_date}...")
-        
-        for delta in range(-flexibility_days, flexibility_days + 1):
-            search_date = (target + timedelta(days=delta)).strftime("%Y-%m-%d")
-            
-            results = self.search_flights(
+        dates = [
+            (target + timedelta(days=d)).strftime("%Y-%m-%d")
+            for d in range(-flexibility_days, flexibility_days + 1)
+        ]
+
+        logger.info(
+            "Flexible search: %d dates around %s (concurrent)", len(dates), target_date
+        )
+
+        def _fetch(date: str):
+            return date, self.search_flights(
                 origin=origin,
                 destination=destination,
-                departure_date=search_date,
+                departure_date=date,
                 adults=adults,
                 nonstop_only=nonstop_only,
-                max_results=3  # Fewer per date to avoid rate limits
+                max_results=3,
             )
-            
-            if not results.get("error") and "offers" in results:
-                for offer in results["offers"]:
-                    offer["search_date"] = search_date
-                    all_results.append(offer)
-        
-        # Sort by price
+
+        all_results = []
+        with ThreadPoolExecutor(max_workers=len(dates)) as executor:
+            futures = {executor.submit(_fetch, d): d for d in dates}
+            for future in as_completed(futures):
+                try:
+                    date, result = future.result()
+                    if not result.get("error") and "offers" in result:
+                        for offer in result["offers"]:
+                            offer["search_date"] = date
+                            all_results.append(offer)
+                except Exception as exc:
+                    logger.warning("Date search raised an exception: %s", exc)
+
         all_results.sort(key=lambda x: x["price"]["total"])
-        
-        print(f"Found {len(all_results)} total options")
-        
+        logger.info("Flexible search found %d total options", len(all_results))
         return all_results
 
 
-# Airport codes reference
-AIRPORTS = {
-    # ============ NIGERIA ============
-    "LOS": {"name": "Murtala Muhammed International", "city": "Lagos", "country": "Nigeria"},
-    "ABV": {"name": "Nnamdi Azikiwe International", "city": "Abuja", "country": "Nigeria"},
-    "PHC": {"name": "Port Harcourt International", "city": "Port Harcourt", "country": "Nigeria"},
-    
-    # ============ UNITED KINGDOM ============
-    "LHR": {"name": "Heathrow", "city": "London", "country": "UK"},
-    "LGW": {"name": "Gatwick", "city": "London Gatwick", "country": "UK"},
-    "STN": {"name": "Stansted", "city": "London Stansted", "country": "UK"},
-    "LTN": {"name": "Luton", "city": "London Luton", "country": "UK"},
-    "MAN": {"name": "Manchester", "city": "Manchester", "country": "UK"},
-    "EDI": {"name": "Edinburgh", "city": "Edinburgh", "country": "UK"},
-    "BHX": {"name": "Birmingham", "city": "Birmingham", "country": "UK"},
-    "GLA": {"name": "Glasgow", "city": "Glasgow", "country": "UK"},
-    
-    # ============ BALKANS & EASTERN EUROPE ============
-    # Georgia
-    "TBS": {"name": "Shota Rustaveli Tbilisi International", "city": "Tbilisi", "country": "Georgia"},
-    "BUS": {"name": "Batumi International", "city": "Batumi", "country": "Georgia"},
-    
-    # Serbia
-    "BEG": {"name": "Nikola Tesla", "city": "Belgrade", "country": "Serbia"},
-    
-    # North Macedonia
-    "SKP": {"name": "Skopje International", "city": "Skopje", "country": "North Macedonia"},
-    "OHD": {"name": "St. Paul the Apostle", "city": "Ohrid", "country": "North Macedonia"},
-    
-    # Montenegro
-    "TGD": {"name": "Podgorica", "city": "Podgorica", "country": "Montenegro"},
-    "TIV": {"name": "Tivat", "city": "Tivat", "country": "Montenegro"},
-    
-    # Albania
-    "TIA": {"name": "Tirana International", "city": "Tirana", "country": "Albania"},
-    
-    # Bosnia & Herzegovina
-    "SJJ": {"name": "Sarajevo International", "city": "Sarajevo", "country": "Bosnia & Herzegovina"},
-    
-    # ============ CARIBBEAN ============
-    # Antigua and Barbuda
-    "ANU": {"name": "V.C. Bird International", "city": "St. John's", "country": "Antigua & Barbuda"},
-    
-    # Dominican Republic
-    "PUJ": {"name": "Punta Cana International", "city": "Punta Cana", "country": "Dominican Republic"},
-    "SDQ": {"name": "Las Americas International", "city": "Santo Domingo", "country": "Dominican Republic"},
-    
-    # Anguilla
-    "AXA": {"name": "Clayton J. Lloyd International", "city": "The Valley", "country": "Anguilla"},
-    
-    # Sint Maarten
-    "SXM": {"name": "Princess Juliana International", "city": "Philipsburg", "country": "Sint Maarten"},
-    
-    # Turks and Caicos
-    "PLS": {"name": "Providenciales International", "city": "Providenciales", "country": "Turks & Caicos"},
-    
-    # ============ MIDDLE EAST ============
-    # Turkey
-    "IST": {"name": "Istanbul Airport", "city": "Istanbul", "country": "Turkey"},
-    "SAW": {"name": "Sabiha Gokcen", "city": "Istanbul Sabiha", "country": "Turkey"},
-    "AYT": {"name": "Antalya", "city": "Antalya", "country": "Turkey"},
-    "ADB": {"name": "Adnan Menderes", "city": "Izmir", "country": "Turkey"},
-    
-    # Qatar
-    "DOH": {"name": "Hamad International", "city": "Doha", "country": "Qatar"},
-    
-    # UAE
-    "DXB": {"name": "Dubai International", "city": "Dubai", "country": "UAE"},
-    "AUH": {"name": "Zayed International", "city": "Abu Dhabi", "country": "UAE"},
-    "SHJ": {"name": "Sharjah International", "city": "Sharjah", "country": "UAE"},
-    
-    # ============ ASIA ============
-    # China
-    "PEK": {"name": "Beijing Capital", "city": "Beijing", "country": "China"},
-    "PKX": {"name": "Beijing Daxing", "city": "Beijing Daxing", "country": "China"},
-    "PVG": {"name": "Pudong International", "city": "Shanghai", "country": "China"},
-    "CAN": {"name": "Baiyun International", "city": "Guangzhou", "country": "China"},
-    "HKG": {"name": "Hong Kong International", "city": "Hong Kong", "country": "Hong Kong"},
-    
-    # Japan
-    "NRT": {"name": "Narita International", "city": "Tokyo Narita", "country": "Japan"},
-    "HND": {"name": "Haneda", "city": "Tokyo Haneda", "country": "Japan"},
-    "KIX": {"name": "Kansai International", "city": "Osaka", "country": "Japan"},
-    
-    # Singapore
-    "SIN": {"name": "Changi", "city": "Singapore", "country": "Singapore"},
-    
-    # ============ EUROPE ============
-    # Netherlands
-    "AMS": {"name": "Schiphol", "city": "Amsterdam", "country": "Netherlands"},
-    "RTM": {"name": "Rotterdam The Hague", "city": "Rotterdam", "country": "Netherlands"},
-    
-    # Italy
-    "FCO": {"name": "Leonardo da Vinci–Fiumicino", "city": "Rome", "country": "Italy"},
-    "MXP": {"name": "Malpensa", "city": "Milan", "country": "Italy"},
-    "VCE": {"name": "Marco Polo", "city": "Venice", "country": "Italy"},
-    "NAP": {"name": "Naples International", "city": "Naples", "country": "Italy"},
-    
-    # France
-    "CDG": {"name": "Charles de Gaulle", "city": "Paris CDG", "country": "France"},
-    "ORY": {"name": "Orly", "city": "Paris Orly", "country": "France"},
-    "NCE": {"name": "Nice Côte d'Azur", "city": "Nice", "country": "France"},
-    "LYS": {"name": "Lyon–Saint-Exupéry", "city": "Lyon", "country": "France"},
-    
-    # Spain
-    "MAD": {"name": "Adolfo Suárez Madrid–Barajas", "city": "Madrid", "country": "Spain"},
-    "BCN": {"name": "Josep Tarradellas Barcelona–El Prat", "city": "Barcelona", "country": "Spain"},
-    "AGP": {"name": "Málaga–Costa del Sol", "city": "Malaga", "country": "Spain"},
-    "PMI": {"name": "Palma de Mallorca", "city": "Palma", "country": "Spain"},
-    
-    # Germany
-    "FRA": {"name": "Frankfurt", "city": "Frankfurt", "country": "Germany"},
-    "MUC": {"name": "Munich", "city": "Munich", "country": "Germany"},
-    "BER": {"name": "Berlin Brandenburg", "city": "Berlin", "country": "Germany"},
-    
-    # ============ AFRICA ============
-    # Morocco
-    "CMN": {"name": "Mohammed V International", "city": "Casablanca", "country": "Morocco"},
-    "RAK": {"name": "Marrakech Menara", "city": "Marrakech", "country": "Morocco"},
-    "TNG": {"name": "Ibn Battouta", "city": "Tangier", "country": "Morocco"},
-    "FEZ": {"name": "Fès–Saïs", "city": "Fez", "country": "Morocco"},
-    
-    # Ethiopia (common connection)
-    "ADD": {"name": "Bole International", "city": "Addis Ababa", "country": "Ethiopia"},
-    
-    # South Africa
-    "JNB": {"name": "O.R. Tambo International", "city": "Johannesburg", "country": "South Africa"},
-    "CPT": {"name": "Cape Town International", "city": "Cape Town", "country": "South Africa"},
-    
-    # Egypt
-    "CAI": {"name": "Cairo International", "city": "Cairo", "country": "Egypt"},
-    
-    # ============ AMERICAS ============
-    # USA (common hubs)
-    "JFK": {"name": "John F. Kennedy", "city": "New York JFK", "country": "USA"},
-    "EWR": {"name": "Newark Liberty", "city": "Newark", "country": "USA"},
-    "LAX": {"name": "Los Angeles International", "city": "Los Angeles", "country": "USA"},
-    "ATL": {"name": "Hartsfield-Jackson", "city": "Atlanta", "country": "USA"},
-    "MIA": {"name": "Miami International", "city": "Miami", "country": "USA"},
-    
-    # Canada
-    "YYZ": {"name": "Toronto Pearson", "city": "Toronto", "country": "Canada"},
-    "YVR": {"name": "Vancouver International", "city": "Vancouver", "country": "Canada"},
-}
-
+# ---------------------------------------------------------------------------
+# Airport helpers
+# ---------------------------------------------------------------------------
 
 def resolve_airport(query: str) -> Optional[str]:
     """
     Resolve city/airport name to IATA code.
-    
+
     Args:
         query: City name or IATA code
-        
+
     Returns:
         IATA code or None if not found
     """
     query_upper = query.upper().strip()
     query_lower = query.lower().strip()
-    
-    # Direct IATA code match
+
     if query_upper in AIRPORTS:
         return query_upper
-    
-    # City name match
+
     for code, info in AIRPORTS.items():
         if query_lower == info["city"].lower():
             return code
@@ -404,7 +413,7 @@ def resolve_airport(query: str) -> Optional[str]:
             return code
         if query_lower in info["name"].lower():
             return code
-    
+
     return None
 
 

@@ -3,11 +3,16 @@ FlightFinder Additional Tools
 Weather, Currency and Timezone
 """
 
+import logging
 import requests
 import os
 from datetime import datetime
 from typing import Optional, Dict, List
 from dataclasses import dataclass
+
+from src.data.airports import AIRPORT_COORDS as _AIRPORT_COORDS, AIRPORT_TIMEZONES as _AIRPORT_TIMEZONES
+
+logger = logging.getLogger(__name__)
 
 
 # WEATHER TOOL - OpenWeatherMap API (Free: 1000 calls/day)
@@ -32,91 +37,8 @@ class WeatherForecast:
 
 class WeatherTool:
     """Get weather forecasts for destinations."""
-    
-    # City to coordinates mapping for airports
-    AIRPORT_COORDS = {
-        # Nigeria
-        "LOS": (6.5244, 3.3792),    # Lagos
-        "ABV": (9.0579, 7.4951),    # Abuja
-        "PHC": (4.8470, 7.0218),    # Port Harcourt
-        
-        # UK
-        "LHR": (51.4700, -0.4543),  # London Heathrow
-        "LGW": (51.1537, -0.1821),  # London Gatwick
-        "MAN": (53.3537, -2.2750),  # Manchester
-        "EDI": (55.9500, -3.3725),  # Edinburgh
-        "STN": (51.8850, 0.2350),   # Stansted
-        "BHX": (52.4539, -1.7480),  # Birmingham
-        "GLA": (55.8719, -4.4331),  # Glasgow
-        
-        # Balkans & Eastern Europe
-        "TBS": (41.6692, 44.9547),  # Tbilisi
-        "BUS": (41.6103, 41.5997),  # Batumi
-        "BEG": (44.8184, 20.3091),  # Belgrade
-        "SKP": (41.9617, 21.6214),  # Skopje
-        "TGD": (42.3594, 19.2519),  # Podgorica
-        "TIV": (42.4047, 18.7233),  # Tivat
-        "TIA": (41.4147, 19.7206),  # Tirana
-        "SJJ": (43.8246, 18.3315),  # Sarajevo
-        
-        # Turkey
-        "IST": (41.2753, 28.7519),  # Istanbul
-        "SAW": (40.8986, 29.3092),  # Sabiha Gokcen
-        "AYT": (36.8987, 30.8005),  # Antalya
-        "ADB": (38.2924, 27.1570),  # Izmir
-        
-        # Middle East
-        "DXB": (25.2532, 55.3657),  # Dubai
-        "AUH": (24.4330, 54.6511),  # Abu Dhabi
-        "DOH": (25.2731, 51.6081),  # Doha
-        "SHJ": (25.3286, 55.5172),  # Sharjah
-        
-        # Asia
-        "SIN": (1.3644, 103.9915),  # Singapore
-        "HND": (35.5494, 139.7798), # Tokyo Haneda
-        "NRT": (35.7720, 140.3929), # Tokyo Narita
-        "KIX": (34.4273, 135.2440), # Osaka
-        "PEK": (40.0799, 116.6031), # Beijing
-        "PVG": (31.1443, 121.8083), # Shanghai
-        "HKG": (22.3080, 113.9185), # Hong Kong
-        "CAN": (23.3924, 113.2988), # Guangzhou
-        
-        # Europe
-        "CDG": (49.0097, 2.5479),   # Paris CDG
-        "ORY": (48.7262, 2.3652),   # Paris Orly
-        "AMS": (52.3105, 4.7683),   # Amsterdam
-        "FCO": (41.8003, 12.2389),  # Rome
-        "MXP": (45.6306, 8.7281),   # Milan
-        "MAD": (40.4983, -3.5676),  # Madrid
-        "BCN": (41.2971, 2.0785),   # Barcelona
-        "FRA": (50.0379, 8.5622),   # Frankfurt
-        "MUC": (48.3538, 11.7861),  # Munich
-        "BER": (52.3667, 13.5033),  # Berlin
-        
-        # Africa
-        "CMN": (33.3675, -7.5898),  # Casablanca
-        "RAK": (31.6069, -8.0363),  # Marrakech
-        "CAI": (30.1219, 31.4056),  # Cairo
-        "JNB": (-26.1392, 28.2460), # Johannesburg
-        "CPT": (-33.9715, 18.6021), # Cape Town
-        "ADD": (8.9779, 38.7993),   # Addis Ababa
-        
-        # Americas
-        "JFK": (40.6413, -73.7781), # New York JFK
-        "EWR": (40.6895, -74.1745), # Newark
-        "LAX": (33.9416, -118.4085),# Los Angeles
-        "MIA": (25.7959, -80.2870), # Miami
-        "ATL": (33.6407, -84.4277), # Atlanta
-        "YYZ": (43.6777, -79.6248), # Toronto
-        "YVR": (49.1967, -123.1815),# Vancouver
-        
-        # Caribbean
-        "PUJ": (18.5675, -68.3634), # Punta Cana
-        "SDQ": (18.4297, -69.6689), # Santo Domingo
-        "SXM": (18.0410, -63.1089), # Sint Maarten
-        "ANU": (17.1367, -61.7927), # Antigua
-        "PLS": (21.7736, -72.2659), # Providenciales
-    }
+
+    AIRPORT_COORDS = _AIRPORT_COORDS
     
     WEATHER_ICONS = {
         "01d": "☀️", "01n": "🌙",  # Clear
@@ -177,7 +99,7 @@ class WeatherTool:
             )
             
         except Exception as e:
-            print(f"Weather API error: {e}")
+            logger.error("Weather API error: %s", e)
             return None
     
     def get_forecast(self, airport_code: str, days: int = 5) -> List[WeatherForecast]:
@@ -234,7 +156,7 @@ class WeatherTool:
             return forecasts[:days]
             
         except Exception as e:
-            print(f"Weather API error: {e}")
+            logger.error("Weather API error: %s", e)
             return []
 
 
@@ -334,62 +256,8 @@ class CurrencyConverter:
 
 class TimeZoneCalculator:
     """Calculate time differences between airports."""
-    
-    # Airport to UTC offset mapping
-    TIMEZONES = {
-        # Nigeria (WAT = UTC+1)
-        "LOS": 1, "ABV": 1, "PHC": 1,
-        
-        # UK (GMT/BST = UTC+0/+1)
-        "LHR": 0, "LGW": 0, "STN": 0, "MAN": 0, "EDI": 0, "BHX": 0, "GLA": 0,
-        
-        # Europe
-        "CDG": 1, "ORY": 1,  # France (CET)
-        "AMS": 1, "RTM": 1,   # Netherlands
-        "FCO": 1, "MXP": 1,   # Italy
-        "MAD": 1, "BCN": 1,   # Spain
-        "FRA": 1, "MUC": 1,   # Germany
-        
-        # Balkans
-        "TBS": 4,  # Georgia (GET)
-        "BEG": 1,  # Serbia (CET)
-        "SKP": 1,  # North Macedonia
-        "TGD": 1,  # Montenegro
-        "TIA": 1,  # Albania
-        "SJJ": 1,  # Bosnia
-        
-        # Turkey
-        "IST": 3, "SAW": 3, "AYT": 3,
-        
-        # Middle East
-        "DXB": 4, "AUH": 4,  # UAE
-        "DOH": 3,  # Qatar
-        
-        # Asia
-        "SIN": 8,  # Singapore
-        "HND": 9, "NRT": 9, "KIX": 9,  # Japan
-        "PEK": 8, "PVG": 8, "HKG": 8,  # China
-        
-        # Africa
-        "CMN": 1, "RAK": 1,  # Morocco
-        "CAI": 2,  # Egypt
-        "JNB": 2, "CPT": 2,  # South Africa
-        "ADD": 3,  # Ethiopia
-        
-        # Americas
-        "JFK": -5, "EWR": -5,  # New York
-        "LAX": -8,  # Los Angeles
-        "MIA": -5,  # Miami
-        "ATL": -5,  # Atlanta
-        "YYZ": -5,  # Toronto
-        "YVR": -8,  # Vancouver
-        
-        # Caribbean
-        "PUJ": -4, "SDQ": -4,  # Dominican Republic
-        "SXM": -4,  # Sint Maarten
-        "ANU": -4,  # Antigua
-        "PLS": -5,  # Turks & Caicos
-    }
+
+    TIMEZONES = _AIRPORT_TIMEZONES
     
     def get_time_difference(self, origin: str, destination: str) -> Dict:
         """Get time difference between airports."""
